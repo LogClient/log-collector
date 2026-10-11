@@ -1,0 +1,26 @@
+name: Prueba manual LOG
+on:
+  workflow_dispatch:
+    inputs:
+      nick:
+        description: Nick público que querés comprobar (un solo perfil)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: log-collector-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    if: github.event.repository.private == false && vars.ZERO_COST_REVIEWED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Una consulta, sin reintentos
+        env:
+          PROBE_NICK: ${{ inputs.nick }}
+        run: python3 remote_collector_probe.py --nick "$PROBE_NICK"
