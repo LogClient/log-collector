@@ -1,5 +1,6 @@
 """Bounded collector. Code is public; roster, ledger and rounds stay private."""
 import base64
+import argparse
 import copy
 from datetime import datetime, timezone
 import json
@@ -19,6 +20,7 @@ INTERVAL = 3 * 3600
 MAX_PLAYERS = 150
 COLLECTION_SECONDS = 18 * 60
 MAX_FILE_BYTES = 8_000_000
+MAX_EARLY_WAIT = 10 * 60
 
 
 class StorageError(Exception):
@@ -31,6 +33,33 @@ def utc_now():
 
 def slot_at(now):
     return int(now.timestamp()) // INTERVAL * INTERVAL
+
+
+def wait_for_slot(now=lambda: datetime.now(timezone.utc), clock=time.monotonic, pause=time.sleep):
+    """One bounded wait, no profiles/storage requests and no collection retry."""
+    current = now()
+    target = slot_at(current) + INTERVAL
+    remaining = target - current.timestamp()
+    if remaining > MAX_EARLY_WAIT:
+        return current, 0
+    begun = clock()
+    deadline = begun + MAX_EARLY_WAIT
+    requested_sleep = 0
+    # Also bound iterations if a broken clock or sleeper fails to advance.
+    for _ in range(MAX_EARLY_WAIT // 30 + 2):
+        current = now()
+        remaining = target - current.timestamp()
+        if remaining <= 0:
+            if current.timestamp() >= target + INTERVAL:
+                raise ValueError('clock_jump_during_wait')
+            return current, round(clock() - begun, 2)
+        budget = min(deadline - clock(), MAX_EARLY_WAIT - requested_sleep)
+        if budget <= 0:
+            raise ValueError('early_wait_limit')
+        seconds = min(30, remaining, budget)
+        requested_sleep += seconds
+        pause(seconds)
+    raise ValueError('early_wait_limit')
 
 
 def roster_names(value):
@@ -211,6 +240,9 @@ def collect(names, capture_one, checkpoint, deadline, clock=time.monotonic, paus
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--wait-for-slot', action='store_true')
+    args = parser.parse_args()
     if sys.platform != 'linux':
         raise SystemExit('Linux required')
     store = None
@@ -222,9 +254,20 @@ def main():
     stage = 'private_storage'
     started = time.monotonic()
     try:
+        stage = 'slot_timing'
+        now = datetime.now(timezone.utc)
+        if args.wait_for_slot:
+            remaining = slot_at(now) + INTERVAL - now.timestamp()
+            if remaining <= MAX_EARLY_WAIT:
+                print(json.dumps({'status': 'waiting_for_slot', 'seconds_until_slot': round(remaining, 2)}), flush=True)
+            now, waited = wait_for_slot()
+            summary['waited_seconds'] = waited
+        # Waiting never consumes the capture budget or claims the previous cut.
+        collection_started = time.monotonic()
+        stage = 'private_storage'
         store = PrivateStore(os.environ.get('DATA_REPOSITORY', ''), os.environ.get('DATA_TOKEN', ''))
         names = roster_names(store.read('roster.json'))
-        slot, state = claim(store, datetime.now(timezone.utc))
+        slot, state = claim(store, now)
         if slot is None:
             summary.update(status='skipped', reason='slot_already_attempted')
             return 0
@@ -247,7 +290,7 @@ def main():
             payload['finished_at'] = utc_now()
             store.write(path, payload)
         report = collect(names, lambda n: capture(n, session), checkpoint,
-                         started + COLLECTION_SECONDS)
+                         collection_started + COLLECTION_SECONDS)
         valid = sum(a['valid_profile'] for a in report['attempts'])
         skins = sum(bool(a.get('observation', {}).get('appearance')) for a in report['attempts'])
         state.update(last_status=report['status'], finished_at=report['finished_at'])
@@ -256,8 +299,10 @@ def main():
         store.write('state.json', state)
         summary.update(status=report['status'], total=len(names), attempted=len(report['attempts']),
                        valid_profiles=valid, valid_skins=skins, pending=len(names)-len(report['attempts']))
-    except Exception:
+    except Exception as error:
         summary.update(status='failed', failed_stage=stage)
+        if stage == 'slot_timing' and str(error) in ('early_wait_limit', 'clock_jump_during_wait'):
+            summary['failure_reason'] = str(error)
         if store and state and slot is not None:
             try:
                 state.update(last_status='failed', finished_at=utc_now())
