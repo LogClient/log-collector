@@ -11,7 +11,7 @@ from urllib.request import urlopen
 
 from capture_core import call, capture
 
-IMAGE = 'ghcr.io/flaresolverr/flaresolverr:v3.5.2'
+IMAGE = 'ghcr.io/flaresolverr/flaresolverr@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767'  # v3.5.2, immutable
 
 
 def validate_nick(value):

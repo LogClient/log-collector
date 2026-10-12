@@ -18,6 +18,7 @@ from remote_collector_probe import docker, wait_ready, IMAGE
 INTERVAL = 3 * 3600
 MAX_PLAYERS = 150
 COLLECTION_SECONDS = 18 * 60
+MAX_FILE_BYTES = 8_000_000
 
 
 class StorageError(Exception):
@@ -116,24 +117,42 @@ class PrivateStore:
         except Exception:
             raise StorageError('storage_unavailable') from None
 
-    def read(self, path, default=None):
+    def read_bytes(self, path):
         payload = self.request('GET', '/contents/' + path + '?ref=' + quote(self.branch, safe=''), missing=True)
         if payload is None:
             self.shas[path] = None
-            return copy.deepcopy(default)
-        if payload.get('type') != 'file' or payload.get('size', 0) > 900_000 or payload.get('encoding') != 'base64':
+            return None
+        if payload.get('type') != 'file' or payload.get('size', 0) > MAX_FILE_BYTES:
             raise StorageError('storage_file_invalid')
         self.shas[path] = payload['sha']
+        if payload.get('encoding') != 'base64':
+            if not re.fullmatch(r'[a-f0-9]{40}', payload['sha']):
+                raise StorageError('storage_file_invalid')
+            payload = self.request('GET', '/git/blobs/' + payload['sha'])
+            if payload.get('encoding') != 'base64' or payload.get('size', 0) > MAX_FILE_BYTES:
+                raise StorageError('storage_file_invalid')
         try:
-            return json.loads(base64.b64decode(payload['content']))
+            result = base64.b64decode(payload['content'])
+            if len(result) > MAX_FILE_BYTES:
+                raise ValueError()
+            return result
         except Exception:
             raise StorageError('storage_file_invalid') from None
+
+    def read(self, path, default=None):
+        content = self.read_bytes(path)
+        if content is None:
+            return copy.deepcopy(default)
+        try:
+            return json.loads(content)
+        except Exception:
+            raise StorageError('storage_json_invalid') from None
 
     def write(self, path, value):
         if path not in self.shas:
             self.read(path)
         content = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
-        if len(content) > 900_000:
+        if len(content) > MAX_FILE_BYTES:
             raise StorageError('storage_file_limit')
         payload = {'message': 'LOG collector checkpoint', 'branch': self.branch,
                    'content': base64.b64encode(content).decode()}
@@ -259,11 +278,16 @@ def main():
         summary['elapsed_seconds'] = round(time.monotonic() - started, 2)
         text = json.dumps(summary, ensure_ascii=False)
         print(text, flush=True)
+        result_path = os.environ.get('COLLECTION_RESULT_FILE')
+        if result_path:
+            from pathlib import Path
+            Path(result_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(result_path).write_text(text, encoding='utf-8')
         summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
         if summary_path:
             with open(summary_path, 'a', encoding='utf-8') as output:
                 output.write('## Ronda LOG · datos privados\n\n```json\n' + text + '\n```\n')
-    return 0 if summary.get('status') == 'complete' else 1
+    return 0 if summary.get('status') in ('complete', 'skipped') or (summary.get('status') == 'partial' and summary.get('pending') == 0 and summary.get('valid_profiles', 0) > 0) else 1
 
 
 if __name__ == '__main__':
