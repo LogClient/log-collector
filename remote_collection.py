@@ -15,12 +15,14 @@ import uuid
 
 from capture_core import call, capture
 from remote_collector_probe import docker, wait_ready, IMAGE
+from remote_configuration import load as load_administration
 
 INTERVAL = 3 * 3600
 MAX_PLAYERS = 150
 COLLECTION_SECONDS = 18 * 60
 MAX_FILE_BYTES = 8_000_000
 MAX_EARLY_WAIT = 10 * 60
+PROFILE_PAUSE_SECONDS = 3
 
 
 class StorageError(Exception):
@@ -259,7 +261,7 @@ def collect(names, capture_one, checkpoint, deadline, clock=time.monotonic, paus
             report['status'] = 'source-unavailable'
             break
         if len(report['attempts']) < len(names):
-            pause(5)
+            pause(PROFILE_PAUSE_SECONDS if attempt['valid_profile'] else 5)
     if report['status'] == 'collecting':
         report['status'] = 'complete' if all(a['valid_profile'] for a in report['attempts']) else 'partial'
     report['finished_at'] = utc_now()
@@ -294,7 +296,12 @@ def main():
         collection_started = time.monotonic()
         stage = 'private_storage'
         store = PrivateStore(os.environ.get('DATA_REPOSITORY', ''), os.environ.get('DATA_TOKEN', ''))
-        names = roster_names(store.read('roster.json'))
+        administration = load_administration(store)
+        roster = administration['roster'] if administration else store.read('roster.json')
+        if administration and not roster['nicks']:
+            summary.update(status='skipped', reason='no_active_accounts')
+            return 0
+        names = roster_names(roster)
         tracking = store.read('tracking-policy.json')
         tracking_start(tracking)
         slot, state = claim(store, now)

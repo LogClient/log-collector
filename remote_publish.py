@@ -11,6 +11,7 @@ import time
 from urllib.request import Request, urlopen
 import zipfile
 from remote_collection import PrivateStore, StorageError
+from remote_configuration import load as load_administration
 
 PROJECT = 'comunidad-log'
 MAX_FILES = 150
@@ -119,6 +120,7 @@ def main():
         if os.environ.get('ZERO_COST_REVIEWED') != 'true' or os.environ.get('CLOUDFLARE_FREE_REVIEWED') != 'true':
             raise ValueError('cost_review_required')
         store = PrivateStore(os.environ.get('DATA_REPOSITORY', ''), os.environ.get('DATA_TOKEN', ''))
+        administration = load_administration(store)
         control = store.read('state.json')
         round_path = control.get('latest_round', '')
         if not re.fullmatch(r'rounds/\d{8}T\d{6}Z\.json', round_path):
@@ -134,8 +136,8 @@ def main():
         engine_state = store.read('engine-state.json')
         if engine_state is None:
             engine_state = store.read('bootstrap-state.json')
-        input_data = {'state': engine_state, 'round': round_data, 'roster': store.read('roster.json'),
-                      'members': store.read('publication-members.json'), 'modalities': config['modalities'],
+        input_data = {'state': engine_state, 'round': round_data, 'roster': administration['roster'] if administration else store.read('roster.json'),
+                      'members': administration['members'] if administration else store.read('publication-members.json'), 'modalities': config['modalities'],
                       'tracking': store.read('tracking-policy.json')}
         input_path = RUN / 'engine-input.json'
         output_state = RUN / 'engine-state.json'
@@ -157,6 +159,11 @@ def main():
             if store.read(backup) is None:
                 store.write(backup, engine_state)
         store.write('engine-state.json', new_state)
+        if administration:
+            for name, value in [('data/events.json', administration['events']), ('data/simulation-draws.json', administration['draws'])]:
+                if name not in config['files']:
+                    raise ValueError('missing_administrative_static_file')
+                (output/name).write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
         actual_files = {p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()}
         if actual_files != set(config['files']) or any(p.is_symlink() for p in output.rglob('*')):
             raise ValueError('unexpected_output_file')
@@ -178,7 +185,7 @@ def main():
         stage = 'cloudflare_preflight'
         account, token = os.environ.get('CLOUDFLARE_ACCOUNT_ID', ''), os.environ.get('CLOUDFLARE_API_TOKEN', '')
         cloudflare_project(account, token)
-        key = round_data['round_id'] + ':' + config['template_sha256']
+        key = round_data['round_id'] + ':' + config['template_sha256'] + (':' + administration['revision'] if administration else '')
         stage = 'publication_reservation'
         ledger = reserve_publication(store, key, args.retry_publication)
         if ledger is None:
@@ -196,7 +203,9 @@ def main():
         execute(['node', str(cli), 'pages', 'deploy', str(output.resolve()), '--project-name', PROJECT,
                  '--branch', 'main', '--commit-dirty=true'], 300, deploy_env, deploy_cwd)
         stage = 'publication_finalize'
-        ledger.update(status='published', published_key=key, published_round=round_data['round_id'])
+        ledger.update(status='published', published_key=key, published_round=round_data['round_id'],
+                      admin_revision=administration['revision'] if administration else None,
+                      published_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
         store.write('publication-control.json', ledger)
         summary.update(status='success', published=True)
     except Exception:
