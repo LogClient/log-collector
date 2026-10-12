@@ -1,7 +1,19 @@
-name: Ronda LOG con historial privado
+name: Actualización LOG y publicación estática
 on:
   workflow_dispatch:
-# Programación pendiente de validar la primera ronda completa:
+    inputs:
+      operation:
+        description: Primera prueba = publicar ronda guardada, sin recolectar
+        type: choice
+        default: publish_saved_round
+        options:
+          - publish_saved_round
+          - collect_and_publish
+      retry_publication:
+        description: Reintento manual único, solo después de revisar un fallo
+        type: boolean
+        default: false
+# Activar únicamente después de comprobar la primera publicación:
 #  schedule:
 #    - cron: '17 */3 * * *'
 permissions:
@@ -10,16 +22,39 @@ concurrency:
   group: log-private-collection
   cancel-in-progress: false
 jobs:
-  collect:
-    if: github.event.repository.private == false && github.ref == 'refs/heads/main' && vars.ZERO_COST_REVIEWED == 'true' && (github.event_name == 'workflow_dispatch' || vars.COLLECTION_ENABLED == 'true')
+  update:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main' && vars.ZERO_COST_REVIEWED == 'true' && vars.CLOUDFLARE_FREE_REVIEWED == 'true' && (github.event_name == 'workflow_dispatch' || vars.COLLECTION_ENABLED == 'true')
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node.js 24
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Una ronda · guardado privado
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Preparar herramienta fijada, sin cachés ni credenciales
+        run: npm ci --prefix deploy-tool --ignore-scripts --no-audit --no-fund
+      - name: Una ronda nueva, sin recuperar horarios perdidos
+        if: github.event_name == 'schedule' || inputs.operation == 'collect_and_publish'
         env:
           DATA_REPOSITORY: ${{ vars.DATA_REPOSITORY }}
           DATA_TOKEN: ${{ secrets.COLLECTOR_DATA_TOKEN }}
+          COLLECTION_RESULT_FILE: .run/collection-result.json
         run: python3 remote_collection.py
+      - name: Generar y publicar únicamente la web estática
+        env:
+          DATA_REPOSITORY: ${{ vars.DATA_REPOSITORY }}
+          DATA_TOKEN: ${{ secrets.COLLECTOR_DATA_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ZERO_COST_REVIEWED: ${{ vars.ZERO_COST_REVIEWED }}
+          CLOUDFLARE_FREE_REVIEWED: ${{ vars.CLOUDFLARE_FREE_REVIEWED }}
+          RETRY_PUBLICATION: ${{ inputs.retry_publication }}
+        run: |
+          if [ "$RETRY_PUBLICATION" = 'true' ]; then
+            python3 remote_publish.py --retry-publication
+          else
+            python3 remote_publish.py
+          fi
