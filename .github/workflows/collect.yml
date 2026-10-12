@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Primera prueba = publicar ronda guardada, sin recolectar
+        description: Elegir recolección completa o publicar la ronda guardada
         type: choice
         default: publish_saved_round
         options:
@@ -13,9 +13,6 @@ on:
         description: Reintento manual único, solo después de revisar un fallo
         type: boolean
         default: false
-  schedule:
-    - cron: '53 2,5,8,11,14,17,20,23 * * *'
-    - cron: '45 21 12 10 *'
 permissions:
   contents: read
 concurrency:
@@ -23,48 +20,27 @@ concurrency:
   cancel-in-progress: false
 jobs:
   update:
-    if: github.event.repository.private == false && github.ref == 'refs/heads/main' && vars.ZERO_COST_REVIEWED == 'true' && vars.CLOUDFLARE_FREE_REVIEWED == 'true' && (github.event_name == 'workflow_dispatch' || vars.COLLECTION_ENABLED == 'true')
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main' && vars.ZERO_COST_REVIEWED == 'true' && vars.CLOUDFLARE_FREE_REVIEWED == 'true' && vars.COLLECTION_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - name: Validar la fecha de la prueba puntual
-        id: one_off_window
-        if: github.event_name == 'schedule' && github.event.schedule == '45 21 12 10 *'
-        run: |
-          python3 - <<'PY'
-          import json, os
-          from datetime import datetime, timezone
-          now = datetime.now(timezone.utc)
-          expected = datetime.fromisoformat('2026-10-12T21:45:00Z'.replace('Z', '+00:00'))
-          allowed = 0 <= (now - expected).total_seconds() <= 3600
-          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
-              out.write('allowed=' + str(allowed).lower() + '\n')
-          text = json.dumps({'mode':'full-scheduled-test', 'expected_at':'2026-10-12T21:45:00Z', 'started_at':now.isoformat(timespec='seconds'), 'test_window_allowed':allowed, 'retries':0})
-          print(text)
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
-              out.write('## Prueba automática completa\n\n```json\n' + text + '\n```\n')
-          PY
-      - if: steps.one_off_window.outputs.allowed != 'false'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - if: steps.one_off_window.outputs.allowed != 'false'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           package-manager-cache: false
       - name: Preparar herramienta fijada, sin cachés ni credenciales
-        if: steps.one_off_window.outputs.allowed != 'false'
         run: npm ci --prefix deploy-tool --ignore-scripts --no-audit --no-fund
       - name: Una ronda nueva, sin recuperar horarios perdidos
-        if: (github.event_name == 'schedule' || inputs.operation == 'collect_and_publish') && steps.one_off_window.outputs.allowed != 'false'
+        if: inputs.operation == 'collect_and_publish'
         env:
           DATA_REPOSITORY: ${{ vars.DATA_REPOSITORY }}
           DATA_TOKEN: ${{ secrets.COLLECTOR_DATA_TOKEN }}
           COLLECTION_RESULT_FILE: .run/collection-result.json
         run: python3 remote_collection.py --wait-for-slot
       - name: Generar y publicar únicamente la web estática
-        if: steps.one_off_window.outputs.allowed != 'false'
         env:
           DATA_REPOSITORY: ${{ vars.DATA_REPOSITORY }}
           DATA_TOKEN: ${{ secrets.COLLECTOR_DATA_TOKEN }}
