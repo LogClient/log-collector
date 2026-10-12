@@ -135,7 +135,8 @@ def main():
         if engine_state is None:
             engine_state = store.read('bootstrap-state.json')
         input_data = {'state': engine_state, 'round': round_data, 'roster': store.read('roster.json'),
-                      'members': store.read('publication-members.json'), 'modalities': config['modalities']}
+                      'members': store.read('publication-members.json'), 'modalities': config['modalities'],
+                      'tracking': store.read('tracking-policy.json')}
         input_path = RUN / 'engine-input.json'
         output_state = RUN / 'engine-state.json'
         input_path.write_text(json.dumps(input_data), encoding='utf-8')
@@ -150,6 +151,11 @@ def main():
         if accepted == 0:
             raise ValueError('no_accepted_captures')
         stage = 'private_state_save'
+        if engine_state.get('scope') == 'preview-native' and new_state.get('scope') == 'beta-native':
+            # Preserve the remote state as it existed immediately before official tracking.
+            backup = 'engine-before-beta-' + new_state['records']['started_at'][:10].replace('-', '') + '.json'
+            if store.read(backup) is None:
+                store.write(backup, engine_state)
         store.write('engine-state.json', new_state)
         actual_files = {p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()}
         if actual_files != set(config['files']) or any(p.is_symlink() for p in output.rglob('*')):
@@ -163,7 +169,9 @@ def main():
                 page = page.replace('Beta · datos reales. La actualización automática todavía está en preparación.',
                                     'Beta · datos reales. Consultá la fecha de la última revisión.')
                 (output/name).write_text(page, encoding='utf-8')
-        summary.update(status='prepared', accepted_captures=accepted)
+        summary.update(status='prepared', accepted_captures=accepted,
+                       tracking_scope=new_state.get('scope'), records_started_at=new_state.get('records', {}).get('started_at'),
+                       confirmed_records=len(new_state.get('records', {}).get('records', {})))
         if args.prepare_only:
             summary['status'] = 'prepared_without_deployment'
             return 0

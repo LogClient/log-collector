@@ -75,6 +75,25 @@ def roster_names(value):
     return names
 
 
+def tracking_start(policy):
+    if policy is None:
+        return None
+    if (not isinstance(policy, dict) or set(policy) != {'schema_version', 'mode', 'starts_at'}
+            or policy['schema_version'] != 1 or policy['mode'] != 'beta'
+            or not isinstance(policy['starts_at'], str)
+            or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T03:00:00Z', policy['starts_at'])):
+        raise ValueError('invalid_tracking_policy')
+    try:
+        return datetime.fromisoformat(policy['starts_at'].replace('Z', '+00:00'))
+    except ValueError:
+        raise ValueError('invalid_tracking_policy') from None
+
+
+def collection_purpose(policy, now):
+    start = tracking_start(policy)
+    return 'beta_collection' if start is not None and now >= start else 'research_only'
+
+
 def project_attempt(nick, entry):
     """Explicit stored projection. No HTML, headers, cookies, TAG or exceptions."""
     result = {'requested_nick': nick, 'valid_profile': False}
@@ -207,9 +226,18 @@ def claim(store, now):
     return slot, state
 
 
-def collect(names, capture_one, checkpoint, deadline, clock=time.monotonic, pause=time.sleep):
-    report = {'schema_version': 1, 'purpose': 'research_only', 'status': 'collecting',
+def collect(names, capture_one, checkpoint, deadline, clock=time.monotonic, pause=time.sleep,
+            purpose='research_only', tracking_started_at=None):
+    if purpose not in ('research_only', 'beta_collection'):
+        raise ValueError('invalid_collection_purpose')
+    if purpose == 'beta_collection':
+        tracking_start({'schema_version': 1, 'mode': 'beta', 'starts_at': tracking_started_at})
+    report = {'schema_version': 1, 'purpose': purpose, 'status': 'collecting',
               'started_at': utc_now(), 'roster': names, 'attempts': []}
+    if purpose == 'beta_collection':
+        if datetime.fromisoformat(report['started_at'].replace('Z', '+00:00')) < tracking_start({'schema_version': 1, 'mode': 'beta', 'starts_at': tracking_started_at}):
+            raise ValueError('collection_predates_tracking_start')
+        report['tracking_started_at'] = tracking_started_at
     consecutive = 0
     for nick in names:
         if clock() + 65 > deadline:
@@ -267,6 +295,8 @@ def main():
         stage = 'private_storage'
         store = PrivateStore(os.environ.get('DATA_REPOSITORY', ''), os.environ.get('DATA_TOKEN', ''))
         names = roster_names(store.read('roster.json'))
+        tracking = store.read('tracking-policy.json')
+        tracking_start(tracking)
         slot, state = claim(store, now)
         if slot is None:
             summary.update(status='skipped', reason='slot_already_attempted')
@@ -289,8 +319,10 @@ def main():
             payload['round_id'] = round_id
             payload['finished_at'] = utc_now()
             store.write(path, payload)
+        purpose = collection_purpose(tracking, datetime.now(timezone.utc))
         report = collect(names, lambda n: capture(n, session), checkpoint,
-                         collection_started + COLLECTION_SECONDS)
+                         collection_started + COLLECTION_SECONDS, purpose=purpose,
+                         tracking_started_at=tracking['starts_at'] if purpose == 'beta_collection' else None)
         valid = sum(a['valid_profile'] for a in report['attempts'])
         skins = sum(bool(a.get('observation', {}).get('appearance')) for a in report['attempts'])
         state.update(last_status=report['status'], finished_at=report['finished_at'])
