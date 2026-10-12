@@ -1,0 +1,25 @@
+name: Ronda LOG con historial privado
+on:
+  workflow_dispatch:
+# Programación pendiente de validar la primera ronda completa:
+#  schedule:
+#    - cron: '17 */3 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: log-private-collection
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main' && vars.ZERO_COST_REVIEWED == 'true' && (github.event_name == 'workflow_dispatch' || vars.COLLECTION_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Una ronda · guardado privado
+        env:
+          DATA_REPOSITORY: ${{ vars.DATA_REPOSITORY }}
+          DATA_TOKEN: ${{ secrets.COLLECTOR_DATA_TOKEN }}
+        run: python3 remote_collection.py
