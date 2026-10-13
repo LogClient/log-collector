@@ -84,8 +84,16 @@ def observation(payload, expected_url, source):
     if 'player_tag' in payload:
         row['player_tag_checked'] = True
     values = payload.get('player_tag')
-    if isinstance(values, list) and len(values) <= 1 and all(isinstance(v, str) and 0 < len(v.strip()) <= 64 for v in values):
-        row['player_tag'] = {'value': values[0].strip() if values else None, 'observed_at': row['observed_at'], 'method': 'public-profile-player-tag-v1'}
+    if (isinstance(values, list) and len(values) <= 16
+            and all(isinstance(v, str) and 0 < len(v.strip()) <= 64 for v in values)):
+        # UniversoCraft also renders cosmetic symbols as ProfilePlayerTag nodes.
+        # They are not a membership TAG; keep ambiguity between actual text TAGs.
+        tags = [v.strip() for v in values
+                if any(char.isalnum() for char in unicodedata.normalize('NFKC', v))]
+        if len(tags) <= 1:
+            row['player_tag'] = {'value': tags[0] if tags else None,
+                                 'observed_at': row['observed_at'],
+                                 'method': 'public-profile-player-tag-v1'}
     texture = skin_texture(payload.get('skin_image'))
     if texture:
         row['appearance'] = {'server_id': 'universocraft', 'profile_url': row['profile_url'],
