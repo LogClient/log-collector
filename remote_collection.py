@@ -97,7 +97,7 @@ def collection_purpose(policy, now):
 
 
 def project_attempt(nick, entry):
-    """Explicit stored projection. No HTML, headers, cookies, TAG or exceptions."""
+    """Private stored projection. No HTML, headers, cookies or exceptions."""
     result = {'requested_nick': nick, 'valid_profile': False}
     row = entry.get('observation') or {}
     if not entry.get('valid_profile'):
@@ -121,6 +121,17 @@ def project_attempt(nick, entry):
     safe = {k: row[k] for k in keys}
     safe.update(nick=row['nick'], modality='skywars', profile_url=expected,
                 observed_at=row['observed_at'])
+    # TAG stays in the private round only; public exports keep their allowlist.
+    if row.get('player_tag_checked') is True:
+        safe['player_tag_checked'] = True
+        tag = row.get('player_tag')
+        if (isinstance(tag, dict)
+                and tag.get('method') == 'public-profile-player-tag-v1'
+                and tag.get('observed_at') == row['observed_at']
+                and (tag.get('value') is None
+                     or isinstance(tag.get('value'), str)
+                     and 0 < len(tag['value'].strip()) <= 64)):
+            safe['player_tag'] = {k: tag[k] for k in ('value', 'observed_at', 'method')}
     skin = row.get('appearance') or {}
     texture = skin.get('texture_url', '')
     if (isinstance(texture, str) and re.fullmatch(r'https://textures\.minecraft\.net/texture/[a-f0-9]{32,64}', texture)
