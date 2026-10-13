@@ -239,6 +239,25 @@ def claim(store, now):
     return slot, state
 
 
+def claim_tag_verification(store, now):
+    """One extra TAG rollout check, reserved durably without moving regular cuts."""
+    state = store.read('state.json', {'schema_version': 1, 'last_slot': None, 'latest_round': None})
+    last = state.get('last_slot')
+    if (state.get('schema_version') != 1
+            or last is not None and (type(last) is not int or last % INTERVAL)):
+        raise StorageError('invalid_state')
+    if state.get('tag_verification_v1') is not None:
+        return None, state
+    timestamp = int(now.timestamp())
+    # A regular cut keeps its own filename; never overwrite that round.
+    if timestamp % INTERVAL == 0 or last is not None and last > timestamp:
+        raise StorageError('manual_check_conflicts_with_cut')
+    state.update(tag_verification_v1=now.isoformat(timespec='seconds'),
+                 last_status='started', started_at=now.isoformat(timespec='seconds'))
+    store.write('state.json', state)
+    return timestamp, state
+
+
 def collect(names, capture_one, checkpoint, deadline, clock=time.monotonic, pause=time.sleep,
             purpose='research_only', tracking_started_at=None):
     if purpose not in ('research_only', 'beta_collection'):
@@ -282,7 +301,9 @@ def collect(names, capture_one, checkpoint, deadline, clock=time.monotonic, paus
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--wait-for-slot', action='store_true')
+    timing = parser.add_mutually_exclusive_group()
+    timing.add_argument('--wait-for-slot', action='store_true')
+    timing.add_argument('--verify-tags-once', action='store_true')
     args = parser.parse_args()
     if sys.platform != 'linux':
         raise SystemExit('Linux required')
@@ -292,6 +313,8 @@ def main():
     session = None
     container = 'log-round-' + uuid.uuid4().hex[:12]
     summary = {'mode': 'remote-private-validation', 'published': False}
+    if args.verify_tags_once:
+        summary['manual_check'] = 'tag-verification-v1'
     stage = 'private_storage'
     started = time.monotonic()
     try:
@@ -315,9 +338,9 @@ def main():
         names = roster_names(roster)
         tracking = store.read('tracking-policy.json')
         tracking_start(tracking)
-        slot, state = claim(store, now)
+        slot, state = claim_tag_verification(store, now) if args.verify_tags_once else claim(store, now)
         if slot is None:
-            summary.update(status='skipped', reason='slot_already_attempted')
+            summary.update(status='skipped', reason='tag_verification_already_attempted' if args.verify_tags_once else 'slot_already_attempted')
             return 0
         stage = 'solver_startup'
         docker('run', '--detach', '--name', container, '--pull=always',
