@@ -1,16 +1,17 @@
-name: Actualización LOG y publicación estática
+name: ActualizaciÃ³n LOG y publicaciÃ³n estÃ¡tica
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Elegir recolección completa o publicar la ronda guardada
+        description: Elegir recolecciÃ³n completa o publicar la ronda guardada
         type: choice
         default: publish_saved_round
         options:
           - publish_saved_round
           - collect_and_publish
+          - verify_tags_once
       retry_publication:
-        description: Reintento manual único, solo después de revisar un fallo
+        description: Reintento manual Ãºnico, solo despuÃ©s de revisar un fallo
         type: boolean
         default: false
 permissions:
@@ -31,16 +32,22 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Preparar herramienta fijada, sin cachés ni credenciales
+      - name: Preparar herramienta fijada, sin cachÃ©s ni credenciales
         run: npm ci --prefix deploy-tool --ignore-scripts --no-audit --no-fund
       - name: Una ronda nueva, sin recuperar horarios perdidos
-        if: inputs.operation == 'collect_and_publish'
+        if: inputs.operation == 'collect_and_publish' || inputs.operation == 'verify_tags_once'
         env:
           DATA_REPOSITORY: ${{ vars.DATA_REPOSITORY }}
           DATA_TOKEN: ${{ secrets.COLLECTOR_DATA_TOKEN }}
           COLLECTION_RESULT_FILE: .run/collection-result.json
-        run: python3 remote_collection.py --wait-for-slot
-      - name: Generar y publicar únicamente la web estática
+          COLLECTION_OPERATION: ${{ inputs.operation }}
+        run: |
+          if [ "$COLLECTION_OPERATION" = 'verify_tags_once' ]; then
+            python3 remote_collection.py --verify-tags-once
+          else
+            python3 remote_collection.py --wait-for-slot
+          fi
+      - name: Generar y publicar Ãºnicamente la web estÃ¡tica
         env:
           DATA_REPOSITORY: ${{ vars.DATA_REPOSITORY }}
           DATA_TOKEN: ${{ secrets.COLLECTOR_DATA_TOKEN }}
