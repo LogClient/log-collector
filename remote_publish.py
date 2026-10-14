@@ -22,6 +22,35 @@ PUBLIC_PAGES = {'index.html', '404.html', 'activity.html', 'compare.html', 'draw
                 'privacy.html', 'ranking.html', 'records.html'}
 PUBLIC_DATA = {'data/config.js', 'data/live-preview.js', 'data/events.json',
                'data/simulation-draws.json', 'data/tournament-history.json'}
+ENGINE_FILES = frozenset({
+    'scripts/remote_public_export.cjs', 'scripts/lib/observation-pipeline.cjs',
+    'scripts/lib/mastery-state.cjs', 'scripts/lib/mastery-experiment.js',
+    'scripts/lib/skywars-score.js', 'scripts/lib/periods.js',
+    'scripts/lib/records-state.cjs', 'scripts/lib/ranking-state.cjs',
+    'web/js/core/ranking.js',
+})
+
+
+def unpack_engine(blob, output):
+    """Trusted private code, isolated from both checkout and static deployment."""
+    if not isinstance(blob, bytes) or not 0 < len(blob) <= 1_000_000:
+        raise ValueError('private_engine_missing_or_size')
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        names = archive.namelist()
+        if len(names) != len(set(names)) or set(names) != ENGINE_FILES:
+            raise ValueError('private_engine_inventory')
+        if sum(item.file_size for item in archive.infolist()) > 2_000_000:
+            raise ValueError('private_engine_size')
+        # Validate every entry before writing anything. No fallback to public code.
+        for item in archive.infolist():
+            if (item.is_dir() or item.flag_bits & 1
+                    or (item.external_attr >> 16) & 0o170000 == 0o120000):
+                raise ValueError('private_engine_entry')
+        for name in names:
+            target = output / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(name))
+    return output / 'scripts/remote_public_export.cjs'
 
 
 def static_name(name):
@@ -133,6 +162,9 @@ def main():
         # Unique directory: no stale worker/functions file can survive a prior run.
         output = RUN / ('site-' + str(time.time_ns()))
         unpack(store.read_bytes('site-template.zip'), config, output)
+        stage = 'private_engine'
+        engine = unpack_engine(store.read_bytes('private-engine.zip'),
+                               RUN / ('engine-' + str(time.time_ns())))
         engine_state = store.read('engine-state.json')
         if engine_state is None:
             engine_state = store.read('bootstrap-state.json')
@@ -146,7 +178,7 @@ def main():
         clean_env = dict(os.environ)
         for name in ['DATA_TOKEN', 'CLOUDFLARE_API_TOKEN']:
             clean_env.pop(name, None)
-        execute(['node', 'scripts/remote_public_export.cjs', str(input_path), str(output_state), str(output/'data/live-preview.js')], 60, clean_env)
+        execute(['node', str(engine), str(input_path), str(output_state), str(output/'data/live-preview.js')], 60, clean_env)
         new_state = json.loads(output_state.read_text(encoding='utf-8'))
         # Do not expose failed source updates as if the whole site was refreshed.
         accepted = len(new_state.get('last_round', {}).get('accepted', []))
